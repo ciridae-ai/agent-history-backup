@@ -1,10 +1,10 @@
-# claude-history-backup Makefile
+# agent-history-backup Makefile
 
 .DEFAULT_GOAL := help
 .PHONY: help install dev test lint format clean uninstall
 
 help:
-	@echo "claude-history-backup - Backup Claude Code session history"
+	@echo "agent-history-backup - Back up Claude Code and Codex transcripts"
 	@echo ""
 	@echo "Available commands:"
 	@echo "  make install    Install globally (production)"
@@ -16,14 +16,14 @@ help:
 	@echo "  make uninstall  Remove global installation"
 	@echo ""
 	@echo "After install:"
-	@echo "  claude-history status      Show sync status"
-	@echo "  claude-history sync        Sync sessions to backup"
-	@echo "  claude-history cron-install Install daily cron job"
+	@echo "  agent-history status             Show backup status and transcript expiry"
+	@echo "  agent-history remote-sync        Copy transcripts to Cloud Storage"
+	@echo "  agent-history scheduler-install  Install the launchd scheduler"
 
 install: clean
-	@echo "Installing claude-history-backup..."
+	@echo "Installing agent-history-backup..."
 	uv tool install --force .
-	@echo "Installed! Run: claude-history --help"
+	@echo "Installed! Run: agent-history --help"
 
 dev: clean
 	@echo "Installing in editable mode..."
@@ -51,5 +51,5 @@ clean:
 
 uninstall:
 	@echo "Uninstalling..."
-	uv tool uninstall claude-history-backup || true
+	uv tool uninstall agent-history-backup || true
 	@echo "Uninstalled"

@@ -1,4 +1,4 @@
-"""Tests for claude-history-backup CLI."""
+"""Tests for agent-history-backup CLI."""
 
 import json
 from datetime import datetime, timedelta
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from claude_history_backup import cli
+from agent_history_backup import cli
 
 
 class TestHelperFunctions:
@@ -87,7 +87,7 @@ class TestMetadataOperations:
 
     def test_load_meta_with_file(self, mock_paths):
         """Should load metadata from file."""
-        meta_file = mock_paths["backup_root"] / ".sync_meta.json"
+        meta_file = mock_paths["meta_file"]
         meta_file.write_text(json.dumps({"last_sync": "2024-01-01"}))
 
         meta = cli.load_meta()
@@ -97,18 +97,18 @@ class TestMetadataOperations:
         """Should save metadata to file."""
         cli.save_meta({"last_sync": "2024-01-02", "last_sync_oldest": "2024-01-01"})
 
-        meta_file = mock_paths["backup_root"] / ".sync_meta.json"
+        meta_file = mock_paths["meta_file"]
         assert meta_file.exists()
         meta = json.loads(meta_file.read_text())
         assert meta["last_sync"] == "2024-01-02"
 
     def test_save_meta_creates_directory(self, mock_paths):
-        """Should create backup directory if it doesn't exist."""
+        """Should create the config directory if it doesn't exist."""
         import shutil
-        shutil.rmtree(mock_paths["backup_root"])
+        shutil.rmtree(mock_paths["meta_file"].parent)
 
         cli.save_meta({"test": "value"})
-        assert (mock_paths["backup_root"] / ".sync_meta.json").exists()
+        assert mock_paths["meta_file"].exists()
 
 
 class TestSessionAnalysis:
@@ -452,7 +452,7 @@ class TestSchedulerCommands:
     def test_scheduler_install_success(self, mock_which, mock_run, mock_paths, cli_runner, monkeypatch):
         """Should install scheduler successfully."""
         # Mock which to return a path
-        mock_which.return_value = "/usr/local/bin/claude-history"
+        mock_which.return_value = "/usr/local/bin/agent-history"
 
         # First call checks if already installed (return 1 = not installed)
         # Second call loads the plist (return 0 = success)
@@ -462,7 +462,7 @@ class TestSchedulerCommands:
         ]
 
         # Mock the plist path to temp dir
-        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.ciridae.agent-history-backup.plist"
         monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
 
         result = cli_runner.invoke(cli.app, ["scheduler-install"])
@@ -476,7 +476,7 @@ class TestSchedulerCommands:
         """Should warn when scheduler already installed."""
         mock_run.return_value = MagicMock(returncode=0)  # Already running
 
-        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.ciridae.agent-history-backup.plist"
         monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
 
         result = cli_runner.invoke(cli.app, ["scheduler-install"])
@@ -488,13 +488,13 @@ class TestSchedulerCommands:
     @patch("shutil.which")
     def test_scheduler_install_failure(self, mock_which, mock_run, mock_paths, cli_runner, monkeypatch):
         """Should error when launchctl load fails."""
-        mock_which.return_value = "/usr/local/bin/claude-history"
+        mock_which.return_value = "/usr/local/bin/agent-history"
         mock_run.side_effect = [
             MagicMock(returncode=1),  # Not installed
             MagicMock(returncode=1, stderr="Permission denied"),  # Load fails
         ]
 
-        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.ciridae.agent-history-backup.plist"
         monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
 
         result = cli_runner.invoke(cli.app, ["scheduler-install"])
@@ -507,7 +507,7 @@ class TestSchedulerCommands:
         """Should remove scheduler successfully."""
         mock_run.return_value = MagicMock(returncode=0)
 
-        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.ciridae.agent-history-backup.plist"
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.write_text("<plist>test</plist>")
         monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
@@ -523,7 +523,7 @@ class TestSchedulerCommands:
         """Should handle removal when not installed."""
         mock_run.return_value = MagicMock(returncode=0)
 
-        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.ciridae.agent-history-backup.plist"
         monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
 
         result = cli_runner.invoke(cli.app, ["scheduler-remove"])
@@ -548,12 +548,9 @@ class TestLogsCommand:
         mock_run.return_value = MagicMock(returncode=0, stdout="[2024-01-01] Sync completed\n[2024-01-02] Check passed")
 
         # Create log file
-        log_file = mock_paths["home"] / ".claude" / "history-backup.log"
+        log_file = mock_paths["log_file"]
         log_file.parent.mkdir(parents=True, exist_ok=True)
         log_file.write_text("test log")
-
-        # Patch Path.home() to return our temp home
-        monkeypatch.setattr(Path, "home", lambda: mock_paths["home"])
 
         result = cli_runner.invoke(cli.app, ["logs"])
 
@@ -565,11 +562,9 @@ class TestLogsCommand:
         """Should handle empty log file."""
         mock_run.return_value = MagicMock(returncode=0, stdout="")
 
-        log_file = mock_paths["home"] / ".claude" / "history-backup.log"
+        log_file = mock_paths["log_file"]
         log_file.parent.mkdir(parents=True, exist_ok=True)
         log_file.write_text("")
-
-        monkeypatch.setattr(Path, "home", lambda: mock_paths["home"])
 
         result = cli_runner.invoke(cli.app, ["logs"])
 
@@ -594,7 +589,7 @@ class TestEdgeCases:
 
     def test_corrupted_meta_file(self, mock_paths):
         """Should handle corrupted meta file gracefully."""
-        meta_file = mock_paths["backup_root"] / ".sync_meta.json"
+        meta_file = mock_paths["meta_file"]
         meta_file.write_text("invalid json")
 
         with pytest.raises(json.JSONDecodeError):
@@ -630,3 +625,240 @@ class TestEdgeCases:
         # Should now have 3 archives
         archives = list(mock_paths["backup_root"].glob("backup_*.zip"))
         assert len(archives) == 3
+
+
+def write_file_with_age(path: Path, days_old: int) -> Path:
+    """Write a made-up file whose modification time is days_old days ago."""
+    import os
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"type": "synthetic"}\n')
+    timestamp = (datetime.now() - timedelta(days=days_old)).timestamp()
+    os.utime(path, (timestamp, timestamp))
+    return path
+
+
+class TestTranscriptExpiry:
+    """Test the transcript expiry report shown by status."""
+
+    def test_counts_only_transcripts_and_finds_oldest(self, mock_paths):
+        projects = mock_paths["claude_projects"]
+        write_file_with_age(projects / "project-a" / "session-1.jsonl", 3)
+        write_file_with_age(projects / "project-a" / "subagents" / "agent-1.jsonl", 12)
+        write_file_with_age(projects / "project-a" / "memory" / "notes.md", 200)
+
+        count, oldest = cli.count_transcripts_and_find_oldest(projects, "*.jsonl")
+
+        assert count == 2
+        expected = datetime.now() - timedelta(days=12)
+        assert abs((oldest - expected).total_seconds()) < 60
+
+    def test_missing_folder_has_no_transcripts(self, tmp_path):
+        assert cli.count_transcripts_and_find_oldest(tmp_path / "missing", "*.jsonl") == (0, None)
+
+    def test_cleanup_period_defaults_to_30_days(self, mock_paths):
+        assert cli.get_claude_cleanup_period_days() == 30
+        mock_paths["claude_settings"].write_text(json.dumps({"model": "opus"}))
+        assert cli.get_claude_cleanup_period_days() == 30
+
+    def test_cleanup_period_read_from_settings(self, mock_paths):
+        mock_paths["claude_settings"].write_text(json.dumps({"cleanupPeriodDays": 90}))
+        assert cli.get_claude_cleanup_period_days() == 90
+
+    def test_status_shows_days_until_oldest_transcript_is_removed(self, mock_paths, cli_runner):
+        mock_paths["claude_settings"].write_text(json.dumps({"cleanupPeriodDays": 90}))
+        write_file_with_age(mock_paths["claude_projects"] / "p" / "old.jsonl", 80)
+        write_file_with_age(mock_paths["claude_projects"] / "p" / "new.jsonl", 1)
+        write_file_with_age(mock_paths["codex_sessions"] / "2026" / "rollout-1.jsonl.zst", 40)
+        cli.save_meta({"last_remote_sync_finished": "2026-11-15T10:00:07"})
+
+        result = cli_runner.invoke(cli.app, ["status"])
+
+        assert result.exit_code == 0
+        claude_row = next(line for line in result.stdout.splitlines() if "Claude Code" in line)
+        assert "90 days" in claude_row
+        assert claude_row.split("│")[-2].strip() == "10"
+        codex_row = next(line for line in result.stdout.splitlines() if "│ Codex  " in line)
+        assert "no automatic" in codex_row
+        assert "Last successful remote sync finished: 2026-11-15T10:00:07" in result.stdout
+
+    def test_status_says_when_oldest_transcript_is_past_retention(self, mock_paths, cli_runner):
+        write_file_with_age(mock_paths["claude_projects"] / "p" / "old.jsonl", 45)
+
+        result = cli_runner.invoke(cli.app, ["status"])
+
+        assert result.exit_code == 0
+        assert "due now" in result.stdout
+        assert "No successful remote sync yet" in result.stdout
+
+
+class TestRemoteSyncCommand:
+    """Test remote-sync against a fake gcloud executable."""
+
+    def configure_destination(self, destination: str = "gs://bucket/transcripts") -> None:
+        cli.save_config({"remote_destination": destination})
+
+    def rsync_calls(self, fake_gcloud) -> list[list[str]]:
+        return [call for call in fake_gcloud.calls() if call[:2] == ["storage", "rsync"]]
+
+    def test_copies_every_source_without_deleting_remote_files(
+        self, mock_paths, fake_gcloud, cli_runner
+    ):
+        self.configure_destination()
+        write_file_with_age(mock_paths["claude_projects"] / "p" / "s.jsonl", 1)
+        write_file_with_age(mock_paths["codex_sessions"] / "2026" / "rollout-1.jsonl.zst", 1)
+        write_file_with_age(mock_paths["codex_archived_sessions"] / "rollout-2.jsonl.zst", 1)
+
+        result = cli_runner.invoke(cli.app, ["remote-sync"])
+
+        assert result.exit_code == 0, result.stdout
+        assert self.rsync_calls(fake_gcloud) == [
+            [
+                "storage",
+                "rsync",
+                "--recursive",
+                str(mock_paths["claude_projects"]),
+                "gs://bucket/transcripts/claude-code/projects",
+            ],
+            [
+                "storage",
+                "rsync",
+                "--recursive",
+                str(mock_paths["codex_sessions"]),
+                "gs://bucket/transcripts/codex/sessions",
+            ],
+            [
+                "storage",
+                "rsync",
+                "--recursive",
+                str(mock_paths["codex_archived_sessions"]),
+                "gs://bucket/transcripts/codex/archived_sessions",
+            ],
+        ]
+        assert "last_remote_sync_finished" in cli.load_meta()
+
+    def test_skips_a_source_folder_that_does_not_exist(self, mock_paths, fake_gcloud, cli_runner):
+        self.configure_destination()
+
+        result = cli_runner.invoke(cli.app, ["remote-sync"])
+
+        assert result.exit_code == 0, result.stdout
+        assert [call[3] for call in self.rsync_calls(fake_gcloud)] == [
+            str(mock_paths["claude_projects"])
+        ]
+        assert "Skipping Codex" in result.stdout
+
+    def test_dry_run_lists_only_and_does_not_record_a_sync(
+        self, mock_paths, fake_gcloud, cli_runner
+    ):
+        result = cli_runner.invoke(
+            cli.app, ["remote-sync", "--dry-run", "--destination", "/tmp/somewhere/"]
+        )
+
+        assert result.exit_code == 0, result.stdout
+        assert self.rsync_calls(fake_gcloud) == [
+            [
+                "storage",
+                "rsync",
+                "--recursive",
+                "--dry-run",
+                str(mock_paths["claude_projects"]),
+                "/tmp/somewhere/claude-code/projects",
+            ]
+        ]
+        assert "last_remote_sync_finished" not in cli.load_meta()
+
+    def test_fails_when_no_destination_is_configured(self, mock_paths, fake_gcloud, cli_runner):
+        result = cli_runner.invoke(cli.app, ["remote-sync"])
+
+        assert result.exit_code == 1
+        assert "No remote destination configured" in result.stdout
+        assert fake_gcloud.calls() == []
+
+    def test_fails_when_gcloud_is_missing(self, mock_paths, tmp_path, monkeypatch, cli_runner):
+        self.configure_destination()
+        empty_bin = tmp_path / "empty-bin"
+        empty_bin.mkdir()
+        monkeypatch.setenv("PATH", str(empty_bin))
+
+        result = cli_runner.invoke(cli.app, ["remote-sync"])
+
+        assert result.exit_code == 1
+        assert "gcloud not found" in result.stdout
+
+    def test_fails_when_gcloud_is_not_logged_in(
+        self, mock_paths, fake_gcloud, monkeypatch, cli_runner
+    ):
+        self.configure_destination()
+        monkeypatch.setenv("FAKE_GCLOUD_ACCOUNT", "")
+
+        result = cli_runner.invoke(cli.app, ["remote-sync"])
+
+        assert result.exit_code == 1
+        assert "not logged in" in result.stdout
+        assert self.rsync_calls(fake_gcloud) == []
+
+    def test_fails_and_records_nothing_when_rsync_fails(
+        self, mock_paths, fake_gcloud, monkeypatch, cli_runner
+    ):
+        self.configure_destination()
+        monkeypatch.setenv("FAKE_GCLOUD_RSYNC_EXIT", "7")
+
+        result = cli_runner.invoke(cli.app, ["remote-sync"])
+
+        assert result.exit_code == 1
+        assert "rsync failed for Claude Code (exit 7)" in result.stdout
+        assert "last_remote_sync_finished" not in cli.load_meta()
+
+
+class TestRemoteDestinationConfig:
+    """Test setting the remote destination."""
+
+    def test_sets_remote_destination(self, mock_paths, cli_runner):
+        result = cli_runner.invoke(
+            cli.app, ["config", "--remote-destination", "gs://bucket/transcripts/"]
+        )
+
+        assert result.exit_code == 0
+        assert cli.load_config()["remote_destination"] == "gs://bucket/transcripts"
+
+    def test_rejects_a_destination_that_is_not_cloud_storage(self, mock_paths, cli_runner):
+        result = cli_runner.invoke(cli.app, ["config", "--remote-destination", "/tmp/backups"])
+
+        assert result.exit_code == 1
+        assert "remote_destination" not in cli.load_config()
+
+
+class TestSchedulerPlist:
+    """Test the launchd job the scheduler would install."""
+
+    def install_dry_run(self, cli_runner, monkeypatch, mock_paths, *flags: str) -> dict:
+        import plistlib
+
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "job.plist"
+        monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
+        with patch("subprocess.run") as mock_run:
+            result = cli_runner.invoke(cli.app, ["scheduler-install", "--dry-run", *flags])
+        assert result.exit_code == 0, result.stdout
+        mock_run.assert_not_called()
+        assert not plist_path.exists()
+        plist_text = result.stdout[result.stdout.index("<?xml") :]
+        return plistlib.loads(plist_text.encode())
+
+    def test_remote_job_runs_remote_sync_weekly_with_gcloud_on_path(
+        self, cli_runner, monkeypatch, mock_paths, fake_gcloud
+    ):
+        job = self.install_dry_run(cli_runner, monkeypatch, mock_paths, "--remote")
+
+        assert job["ProgramArguments"][1:] == ["remote-sync"]
+        assert job["StartCalendarInterval"] == {"Weekday": 0, "Hour": 10, "Minute": 0}
+        assert job["EnvironmentVariables"]["PATH"].startswith(f"{fake_gcloud.path.parent}:")
+        assert job["StandardOutPath"] == job["StandardErrorPath"]
+
+    def test_default_job_still_runs_the_daily_local_check(
+        self, cli_runner, monkeypatch, mock_paths
+    ):
+        job = self.install_dry_run(cli_runner, monkeypatch, mock_paths)
+
+        assert job["ProgramArguments"][1:] == ["check", "--quiet"]
+        assert job["StartCalendarInterval"] == {"Hour": 10, "Minute": 0}

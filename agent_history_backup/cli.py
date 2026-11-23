@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""CLI for backing up Claude Code session history.
+"""CLI for backing up Claude Code and Codex session history.
 
-Monitors ~/.claude/projects/ and creates timestamped zip archives
-before Claude's automatic cleanup removes old sessions.
+Creates timestamped zip archives of ~/.claude/projects/ locally, and copies
+Claude Code and Codex transcripts incrementally to Google Cloud Storage,
+before automatic cleanup removes old sessions.
 """
 
+import fnmatch
 import json
+import os
+import plistlib
 import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple
 
 import typer
 from rich.console import Console
@@ -18,22 +22,51 @@ from rich.panel import Panel
 from rich.table import Table
 
 app = typer.Typer(
-    name="claude-history",
-    help="Backup and manage Claude Code session history",
+    name="agent-history",
+    help="Back up Claude Code and Codex session transcripts",
     add_completion=True,
     no_args_is_help=True,
     rich_markup_mode="rich",
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-console = Console()
+console = Console(soft_wrap=True)
 
 # Paths
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
-CONFIG_FILE = Path.home() / ".config" / "claude-history" / "config.json"
+CONFIG_DIR = Path.home() / ".config" / "agent-history-backup"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+META_FILE = CONFIG_DIR / "sync_meta.json"
+LOG_FILE = Path.home() / "Library" / "Logs" / "agent-history-backup.log"
 DEFAULT_BACKUP_ROOT = Path.home() / "claude_code_history"
+CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
+CODEX_ARCHIVED_SESSIONS = Path.home() / ".codex" / "archived_sessions"
+CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 
 # Threshold for triggering sync (days)
 SYNC_THRESHOLD_DAYS = 3
+
+# Claude Code's retention when settings.json has no cleanupPeriodDays
+DEFAULT_CLAUDE_CLEANUP_PERIOD_DAYS = 30
+
+
+class TranscriptSource(NamedTuple):
+    """A local folder of agent transcripts and where it is copied under the remote destination."""
+
+    name: str
+    path: Path
+    remote_folder: str
+    transcript_file_pattern: str
+
+
+def get_transcript_sources() -> list[TranscriptSource]:
+    """Every local transcript folder that remote-sync copies."""
+    return [
+        TranscriptSource("Claude Code", CLAUDE_PROJECTS, "claude-code/projects", "*.jsonl"),
+        TranscriptSource("Codex", CODEX_SESSIONS, "codex/sessions", "rollout-*"),
+        TranscriptSource(
+            "Codex archived", CODEX_ARCHIVED_SESSIONS, "codex/archived_sessions", "rollout-*"
+        ),
+    ]
 
 
 def load_config() -> dict:
@@ -55,10 +88,6 @@ def get_backup_root() -> Path:
     return Path(config.get("backup_root", str(DEFAULT_BACKUP_ROOT)))
 
 
-def get_meta_file() -> Path:
-    return get_backup_root() / ".sync_meta.json"
-
-
 def info(text: str) -> str:
     return f"[cyan]ℹ {text}[/cyan]"
 
@@ -75,7 +104,7 @@ def warning(text: str) -> str:
     return f"[yellow]⚠ {text}[/yellow]"
 
 
-def get_oldest_session_date(path: Path) -> Optional[datetime]:
+def get_oldest_session_date(path: Path) -> datetime | None:
     """Get the modification time of the oldest session directory."""
     if not path.exists():
         return None
@@ -89,7 +118,7 @@ def get_oldest_session_date(path: Path) -> Optional[datetime]:
     return oldest
 
 
-def get_newest_session_date(path: Path) -> Optional[datetime]:
+def get_newest_session_date(path: Path) -> datetime | None:
     """Get the modification time of the newest session directory."""
     if not path.exists():
         return None
@@ -105,17 +134,15 @@ def get_newest_session_date(path: Path) -> Optional[datetime]:
 
 def load_meta() -> dict:
     """Load sync metadata."""
-    meta_file = get_meta_file()
-    if meta_file.exists():
-        return json.loads(meta_file.read_text())
+    if META_FILE.exists():
+        return json.loads(META_FILE.read_text())
     return {}
 
 
 def save_meta(meta: dict) -> None:
     """Save sync metadata."""
-    meta_file = get_meta_file()
-    meta_file.parent.mkdir(parents=True, exist_ok=True)
-    meta_file.write_text(json.dumps(meta, indent=2, default=str))
+    META_FILE.parent.mkdir(parents=True, exist_ok=True)
+    META_FILE.write_text(json.dumps(meta, indent=2, default=str))
 
 
 def count_sessions(path: Path) -> int:
@@ -146,12 +173,71 @@ def get_archives() -> list[Path]:
     return sorted(backup_root.glob("backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def count_transcripts_and_find_oldest(path: Path, file_pattern: str) -> tuple[int, datetime | None]:
+    """Count transcript files under path and return the oldest file modification time.
+
+    Only file metadata is read, never file contents.
+    """
+    count = 0
+    oldest_mtime = None
+    for directory, _, file_names in os.walk(path):
+        for file_name in fnmatch.filter(file_names, file_pattern):
+            mtime = os.stat(os.path.join(directory, file_name)).st_mtime
+            count += 1
+            if oldest_mtime is None or mtime < oldest_mtime:
+                oldest_mtime = mtime
+    return count, datetime.fromtimestamp(oldest_mtime) if oldest_mtime is not None else None
+
+
+def get_claude_cleanup_period_days() -> int:
+    """Read Claude Code's transcript retention (cleanupPeriodDays) from its settings.json."""
+    if not CLAUDE_SETTINGS.exists():
+        return DEFAULT_CLAUDE_CLEANUP_PERIOD_DAYS
+    settings = json.loads(CLAUDE_SETTINGS.read_text())
+    return int(settings.get("cleanupPeriodDays", DEFAULT_CLAUDE_CLEANUP_PERIOD_DAYS))
+
+
+def print_transcript_expiry() -> None:
+    """Print, per transcript source, the oldest transcript and when Claude Code would remove it."""
+    cleanup_period_days = get_claude_cleanup_period_days()
+    table = Table(title="Transcript Expiry")
+    table.add_column("Source", style="cyan")
+    table.add_column("Transcripts", style="white")
+    table.add_column("Oldest", style="white")
+    table.add_column("Retention", style="white")
+    table.add_column("Days until oldest is removed", style="white")
+
+    for source in get_transcript_sources():
+        count, oldest = count_transcripts_and_find_oldest(
+            source.path, source.transcript_file_pattern
+        )
+        oldest_text = oldest.strftime("%Y-%m-%d %H:%M") if oldest else "N/A"
+        if source.path != CLAUDE_PROJECTS:
+            table.add_row(source.name, str(count), oldest_text, "no automatic cleanup known", "-")
+            continue
+        if oldest is None:
+            days_left_text = "-"
+        else:
+            days_left = cleanup_period_days - (datetime.now() - oldest).days
+            days_left_text = str(days_left) if days_left > 0 else "due now"
+        table.add_row(
+            source.name, str(count), oldest_text, f"{cleanup_period_days} days", days_left_text
+        )
+
+    console.print(table)
+    last_remote_sync = load_meta().get("last_remote_sync_finished")
+    if last_remote_sync:
+        console.print(info(f"Last successful remote sync finished: {last_remote_sync}"))
+    else:
+        console.print(warning("No successful remote sync yet"))
+
+
 @app.command()
 def status() -> None:
     """Show current sync status.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history status
+      [dim]$[/dim] agent-history status
     """
     meta = load_meta()
     backup_root = get_backup_root()
@@ -168,7 +254,7 @@ def status() -> None:
     archive_total_size = get_dir_size(backup_root) if backup_root.exists() else "0"
 
     # Build status table
-    table = Table(title="Claude History Sync Status")
+    table = Table(title="Local Archive Status")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="white")
 
@@ -215,6 +301,9 @@ def status() -> None:
                 f"\n{success(f'No sync needed. {gap} days since oldest backed up session.')}"
             )
 
+    console.print()
+    print_transcript_expiry()
+
 
 @app.command()
 def sync(
@@ -225,8 +314,8 @@ def sync(
     Creates a timestamped zip of ~/.claude/projects/
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history sync
-      [dim]$[/dim] claude-history sync --force
+      [dim]$[/dim] agent-history sync
+      [dim]$[/dim] agent-history sync --force
     """
     if not CLAUDE_PROJECTS.exists():
         console.print(error("~/.claude/projects not found"))
@@ -267,8 +356,8 @@ def check(
     of the oldest session at last sync time.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history check
-      [dim]$[/dim] claude-history check --quiet
+      [dim]$[/dim] agent-history check
+      [dim]$[/dim] agent-history check --quiet
     """
     meta = load_meta()
     projects_oldest = get_oldest_session_date(CLAUDE_PROJECTS)
@@ -298,57 +387,142 @@ def check(
             console.print(success(f"No sync needed. Gap is {gap} days."))
 
 
+@app.command("remote-sync")
+def remote_sync(
+    destination: str | None = typer.Option(
+        None,
+        "--destination",
+        "-d",
+        help="Copy to this destination instead of the configured remote destination",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="List what would be copied without copying"
+    ),
+) -> None:
+    """Copy all Claude Code and Codex transcripts to Google Cloud Storage.
+
+    Runs [bold]gcloud storage rsync --recursive[/bold] per source, so each run copies
+    only new or changed files. Files removed locally are never deleted remotely.
+    Exits 1 when gcloud is missing, not logged in, or no destination is set.
+
+    [bold cyan]EXAMPLES[/bold cyan]:
+      [dim]$[/dim] agent-history remote-sync
+      [dim]$[/dim] agent-history remote-sync --dry-run
+    """
+    console.print(info(f"remote-sync started at {datetime.now().isoformat(timespec='seconds')}"))
+
+    destination = destination or load_config().get("remote_destination")
+    if not destination:
+        console.print(
+            error(
+                "No remote destination configured. "
+                "Run: agent-history config --remote-destination gs://BUCKET/PREFIX"
+            )
+        )
+        raise typer.Exit(code=1)
+    destination = destination.rstrip("/")
+
+    gcloud_path = shutil.which("gcloud")
+    if not gcloud_path:
+        console.print(error("gcloud not found on PATH. Install the Google Cloud CLI."))
+        raise typer.Exit(code=1)
+
+    active_account = subprocess.run(
+        [gcloud_path, "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if not active_account:
+        console.print(error("gcloud is not logged in. Run: gcloud auth login"))
+        raise typer.Exit(code=1)
+
+    for source in get_transcript_sources():
+        if not source.path.exists():
+            console.print(warning(f"Skipping {source.name}: {source.path} not found"))
+            continue
+        source_destination = f"{destination}/{source.remote_folder}"
+        console.print(info(f"{source.name}: {source.path} -> {source_destination}"))
+        command = [gcloud_path, "storage", "rsync", "--recursive"]
+        if dry_run:
+            command.append("--dry-run")
+        result = subprocess.run([*command, str(source.path), source_destination])
+        if result.returncode != 0:
+            console.print(
+                error(f"gcloud storage rsync failed for {source.name} (exit {result.returncode})")
+            )
+            raise typer.Exit(code=1)
+
+    finished_at = datetime.now().isoformat(timespec="seconds")
+    if dry_run:
+        console.print(success(f"remote-sync dry run finished at {finished_at}"))
+        return
+    meta = load_meta()
+    meta["last_remote_sync_finished"] = finished_at
+    save_meta(meta)
+    console.print(success(f"remote-sync finished at {finished_at}"))
+
+
 # launchd plist path
-LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
-LAUNCHD_LABEL = "com.warren.claude-history-backup"
+LAUNCHD_LABEL = "com.ciridae.agent-history-backup"
+LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 
-PLIST_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.warren.claude-history-backup</string>
+LAUNCHD_SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
-    <key>ProgramArguments</key>
-    <array>
-        <string>{cli_path}</string>
-        <string>check</string>
-        <string>--quiet</string>
-    </array>
 
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>10</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
+def build_launchd_plist(cli_path: str, log_path: str, remote: bool) -> bytes:
+    """Build the launchd job: a daily local check, or a weekly remote-sync when remote is set.
 
-    <key>StandardOutPath</key>
-    <string>{log_path}</string>
-    <key>StandardErrorPath</key>
-    <string>{log_path}</string>
-</dict>
-</plist>
-"""
+    launchd starts jobs with only the system PATH, so the remote job's PATH also holds
+    the folder where gcloud is installed now.
+    """
+    job: dict[str, object] = {
+        "Label": LAUNCHD_LABEL,
+        "StandardOutPath": log_path,
+        "StandardErrorPath": log_path,
+    }
+    if remote:
+        job["ProgramArguments"] = [cli_path, "remote-sync"]
+        job["StartCalendarInterval"] = {"Weekday": 0, "Hour": 10, "Minute": 0}
+        gcloud_path = shutil.which("gcloud")
+        job["EnvironmentVariables"] = {
+            "PATH": f"{Path(gcloud_path).parent}:{LAUNCHD_SYSTEM_PATH}"
+            if gcloud_path
+            else LAUNCHD_SYSTEM_PATH
+        }
+    else:
+        job["ProgramArguments"] = [cli_path, "check", "--quiet"]
+        job["StartCalendarInterval"] = {"Hour": 10, "Minute": 0}
+    return plistlib.dumps(job)
 
 
 @app.command("scheduler-install")
-def scheduler_install() -> None:
-    """Install launchd scheduler for automatic sync checks.
+def scheduler_install(
+    remote: bool = typer.Option(
+        False, "--remote", help="Run remote-sync weekly instead of the daily local check"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plist without installing it"),
+) -> None:
+    """Install launchd scheduler for automatic backups.
 
     Uses macOS launchd (runs missed jobs on wake, unlike cron).
-    Runs daily at 10 AM.
+    Default: daily at 10 AM, runs [bold]check --quiet[/bold] (local zip archive).
+    With --remote: Sundays at 10 AM, runs [bold]remote-sync[/bold] to Google Cloud Storage.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history scheduler-install
+      [dim]$[/dim] agent-history scheduler-install
+      [dim]$[/dim] agent-history scheduler-install --remote --dry-run
     """
-    # Find claude-history path
-    cli_path = shutil.which("claude-history")
+    # Find agent-history path
+    cli_path = shutil.which("agent-history")
     if not cli_path:
-        cli_path = str(Path.home() / ".local" / "bin" / "claude-history")
+        cli_path = str(Path.home() / ".local" / "bin" / "agent-history")
 
-    log_path = str(Path.home() / ".claude" / "history-backup.log")
+    plist_content = build_launchd_plist(cli_path, str(LOG_FILE), remote)
+
+    if dry_run:
+        console.print(info(f"Would write {LAUNCHD_PLIST}:"))
+        print(plist_content.decode())
+        return
 
     # Check if already installed
     result = subprocess.run(
@@ -363,8 +537,7 @@ def scheduler_install() -> None:
 
     # Write plist
     LAUNCHD_PLIST.parent.mkdir(parents=True, exist_ok=True)
-    plist_content = PLIST_CONTENT.format(cli_path=cli_path, log_path=log_path)
-    LAUNCHD_PLIST.write_text(plist_content)
+    LAUNCHD_PLIST.write_bytes(plist_content)
 
     # Load it
     result = subprocess.run(
@@ -374,7 +547,8 @@ def scheduler_install() -> None:
     )
 
     if result.returncode == 0:
-        console.print(success("Scheduler installed (daily at 10 AM)"))
+        schedule = "weekly remote-sync, Sundays at 10 AM" if remote else "daily at 10 AM"
+        console.print(success(f"Scheduler installed ({schedule})"))
         console.print(info("Uses launchd - runs missed jobs on wake"))
         console.print(info(f"Plist: {LAUNCHD_PLIST}"))
     else:
@@ -387,7 +561,7 @@ def scheduler_remove() -> None:
     """Remove the launchd scheduler.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history scheduler-remove
+      [dim]$[/dim] agent-history scheduler-remove
     """
     # Unload if running
     subprocess.run(
@@ -408,7 +582,7 @@ def scheduler_status() -> None:
     """Check scheduler status.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history scheduler-status
+      [dim]$[/dim] agent-history scheduler-status
     """
     result = subprocess.run(
         ["launchctl", "list", LAUNCHD_LABEL],
@@ -420,9 +594,8 @@ def scheduler_status() -> None:
         console.print(success("Scheduler is active"))
         console.print(info(f"Plist: {LAUNCHD_PLIST}"))
         # Show last run time from log
-        log_file = Path.home() / ".claude" / "history-backup.log"
-        if log_file.exists():
-            mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
+        if LOG_FILE.exists():
+            mtime = datetime.fromtimestamp(LOG_FILE.stat().st_mtime)
             console.print(info(f"Log last modified: {mtime.strftime('%Y-%m-%d %H:%M')}"))
     else:
         console.print(warning("Scheduler is not active"))
@@ -437,17 +610,15 @@ def logs(
     """Show backup log file.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history logs
-      [dim]$[/dim] claude-history logs -n 50
+      [dim]$[/dim] agent-history logs
+      [dim]$[/dim] agent-history logs -n 50
     """
-    log_file = Path.home() / ".claude" / "history-backup.log"
-
-    if not log_file.exists():
+    if not LOG_FILE.exists():
         console.print(info("No log file yet"))
         return
 
     result = subprocess.run(
-        ["tail", f"-{lines}", str(log_file)],
+        ["tail", f"-{lines}", str(LOG_FILE)],
         capture_output=True,
         text=True,
     )
@@ -463,7 +634,7 @@ def list_archives() -> None:
     """List all backup archives.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history list
+      [dim]$[/dim] agent-history list
     """
     archives = get_archives()
 
@@ -490,24 +661,39 @@ def list_archives() -> None:
 
 @app.command()
 def config(
-    backup_root: Optional[str] = typer.Option(
+    backup_root: str | None = typer.Option(
         None, "--backup-root", "-b", help="Set backup root directory"
+    ),
+    remote_destination: str | None = typer.Option(
+        None,
+        "--remote-destination",
+        "-r",
+        help="Set the gs://BUCKET/PREFIX that remote-sync copies transcripts to",
     ),
 ) -> None:
     """View or set configuration.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history config
-      [dim]$[/dim] claude-history config --backup-root ~/my-backups
+      [dim]$[/dim] agent-history config
+      [dim]$[/dim] agent-history config --backup-root ~/my-backups
+      [dim]$[/dim] agent-history config --remote-destination gs://my-bucket/transcripts
     """
     cfg = load_config()
 
-    if backup_root:
-        # Expand ~ and resolve path
-        new_root = Path(backup_root).expanduser().resolve()
-        cfg["backup_root"] = str(new_root)
+    if remote_destination and not remote_destination.startswith("gs://"):
+        console.print(error("Remote destination must start with gs://"))
+        raise typer.Exit(code=1)
+
+    if remote_destination or backup_root:
+        if remote_destination:
+            cfg["remote_destination"] = remote_destination.rstrip("/")
+            console.print(success(f"Remote destination set to: {cfg['remote_destination']}"))
+        if backup_root:
+            # Expand ~ and resolve path
+            new_root = Path(backup_root).expanduser().resolve()
+            cfg["backup_root"] = str(new_root)
+            console.print(success(f"Backup root set to: {new_root}"))
         save_config(cfg)
-        console.print(success(f"Backup root set to: {new_root}"))
         return
 
     # Show current config
@@ -515,6 +701,7 @@ def config(
     console.print(
         Panel(
             f"[cyan]Backup location:[/cyan] {current_root}\n"
+            f"[cyan]Remote destination:[/cyan] {cfg.get('remote_destination', 'not set')}\n"
             f"[cyan]Config file:[/cyan] {CONFIG_FILE}",
             title="Configuration",
             border_style="cyan",
