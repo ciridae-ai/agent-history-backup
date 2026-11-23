@@ -1,4 +1,4 @@
-"""Shared fixtures for testing claude-history-backup."""
+"""Shared fixtures for testing agent-history-backup."""
 
 from datetime import datetime, timedelta
 
@@ -16,7 +16,7 @@ def temp_home(tmp_path):
     claude_projects.mkdir(parents=True)
 
     # Create config directory
-    config_dir = home / ".config" / "claude-history"
+    config_dir = home / ".config" / "agent-history-backup"
     config_dir.mkdir(parents=True)
 
     # Create default backup root
@@ -29,13 +29,16 @@ def temp_home(tmp_path):
 @pytest.fixture
 def mock_paths(temp_home, monkeypatch):
     """Mock all path constants to use temp directories."""
-    import claude_history_backup.cli as cli
+    import agent_history_backup.cli as cli
 
     claude_projects = temp_home / ".claude" / "projects"
     claude_settings = temp_home / ".claude" / "settings.json"
     codex_sessions = temp_home / ".codex" / "sessions"
     codex_archived_sessions = temp_home / ".codex" / "archived_sessions"
-    config_file = temp_home / ".config" / "claude-history" / "config.json"
+    config_dir = temp_home / ".config" / "agent-history-backup"
+    config_file = config_dir / "config.json"
+    meta_file = config_dir / "sync_meta.json"
+    log_file = temp_home / "Library" / "Logs" / "agent-history-backup.log"
     backup_root = temp_home / "claude_code_history"
 
     monkeypatch.setattr(cli, "CLAUDE_PROJECTS", claude_projects)
@@ -43,6 +46,8 @@ def mock_paths(temp_home, monkeypatch):
     monkeypatch.setattr(cli, "CODEX_SESSIONS", codex_sessions)
     monkeypatch.setattr(cli, "CODEX_ARCHIVED_SESSIONS", codex_archived_sessions)
     monkeypatch.setattr(cli, "CONFIG_FILE", config_file)
+    monkeypatch.setattr(cli, "META_FILE", meta_file)
+    monkeypatch.setattr(cli, "LOG_FILE", log_file)
     monkeypatch.setattr(cli, "DEFAULT_BACKUP_ROOT", backup_root)
 
     return {
@@ -52,6 +57,8 @@ def mock_paths(temp_home, monkeypatch):
         "codex_sessions": codex_sessions,
         "codex_archived_sessions": codex_archived_sessions,
         "config_file": config_file,
+        "meta_file": meta_file,
+        "log_file": log_file,
         "backup_root": backup_root,
     }
 

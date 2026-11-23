@@ -14,7 +14,7 @@ import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 import typer
 from rich.console import Console
@@ -22,18 +22,21 @@ from rich.panel import Panel
 from rich.table import Table
 
 app = typer.Typer(
-    name="claude-history",
-    help="Backup and manage Claude Code session history",
+    name="agent-history",
+    help="Back up Claude Code and Codex session transcripts",
     add_completion=True,
     no_args_is_help=True,
     rich_markup_mode="rich",
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-console = Console()
+console = Console(soft_wrap=True)
 
 # Paths
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
-CONFIG_FILE = Path.home() / ".config" / "claude-history" / "config.json"
+CONFIG_DIR = Path.home() / ".config" / "agent-history-backup"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+META_FILE = CONFIG_DIR / "sync_meta.json"
+LOG_FILE = Path.home() / "Library" / "Logs" / "agent-history-backup.log"
 DEFAULT_BACKUP_ROOT = Path.home() / "claude_code_history"
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 CODEX_ARCHIVED_SESSIONS = Path.home() / ".codex" / "archived_sessions"
@@ -85,10 +88,6 @@ def get_backup_root() -> Path:
     return Path(config.get("backup_root", str(DEFAULT_BACKUP_ROOT)))
 
 
-def get_meta_file() -> Path:
-    return get_backup_root() / ".sync_meta.json"
-
-
 def info(text: str) -> str:
     return f"[cyan]ℹ {text}[/cyan]"
 
@@ -105,7 +104,7 @@ def warning(text: str) -> str:
     return f"[yellow]⚠ {text}[/yellow]"
 
 
-def get_oldest_session_date(path: Path) -> Optional[datetime]:
+def get_oldest_session_date(path: Path) -> datetime | None:
     """Get the modification time of the oldest session directory."""
     if not path.exists():
         return None
@@ -119,7 +118,7 @@ def get_oldest_session_date(path: Path) -> Optional[datetime]:
     return oldest
 
 
-def get_newest_session_date(path: Path) -> Optional[datetime]:
+def get_newest_session_date(path: Path) -> datetime | None:
     """Get the modification time of the newest session directory."""
     if not path.exists():
         return None
@@ -135,17 +134,15 @@ def get_newest_session_date(path: Path) -> Optional[datetime]:
 
 def load_meta() -> dict:
     """Load sync metadata."""
-    meta_file = get_meta_file()
-    if meta_file.exists():
-        return json.loads(meta_file.read_text())
+    if META_FILE.exists():
+        return json.loads(META_FILE.read_text())
     return {}
 
 
 def save_meta(meta: dict) -> None:
     """Save sync metadata."""
-    meta_file = get_meta_file()
-    meta_file.parent.mkdir(parents=True, exist_ok=True)
-    meta_file.write_text(json.dumps(meta, indent=2, default=str))
+    META_FILE.parent.mkdir(parents=True, exist_ok=True)
+    META_FILE.write_text(json.dumps(meta, indent=2, default=str))
 
 
 def count_sessions(path: Path) -> int:
@@ -240,7 +237,7 @@ def status() -> None:
     """Show current sync status.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history status
+      [dim]$[/dim] agent-history status
     """
     meta = load_meta()
     backup_root = get_backup_root()
@@ -257,7 +254,7 @@ def status() -> None:
     archive_total_size = get_dir_size(backup_root) if backup_root.exists() else "0"
 
     # Build status table
-    table = Table(title="Claude History Sync Status")
+    table = Table(title="Local Archive Status")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="white")
 
@@ -317,8 +314,8 @@ def sync(
     Creates a timestamped zip of ~/.claude/projects/
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history sync
-      [dim]$[/dim] claude-history sync --force
+      [dim]$[/dim] agent-history sync
+      [dim]$[/dim] agent-history sync --force
     """
     if not CLAUDE_PROJECTS.exists():
         console.print(error("~/.claude/projects not found"))
@@ -359,8 +356,8 @@ def check(
     of the oldest session at last sync time.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history check
-      [dim]$[/dim] claude-history check --quiet
+      [dim]$[/dim] agent-history check
+      [dim]$[/dim] agent-history check --quiet
     """
     meta = load_meta()
     projects_oldest = get_oldest_session_date(CLAUDE_PROJECTS)
@@ -409,8 +406,8 @@ def remote_sync(
     Exits 1 when gcloud is missing, not logged in, or no destination is set.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history remote-sync
-      [dim]$[/dim] claude-history remote-sync --dry-run
+      [dim]$[/dim] agent-history remote-sync
+      [dim]$[/dim] agent-history remote-sync --dry-run
     """
     console.print(info(f"remote-sync started at {datetime.now().isoformat(timespec='seconds')}"))
 
@@ -419,7 +416,7 @@ def remote_sync(
         console.print(
             error(
                 "No remote destination configured. "
-                "Run: claude-history config --remote-destination gs://BUCKET/PREFIX"
+                "Run: agent-history config --remote-destination gs://BUCKET/PREFIX"
             )
         )
         raise typer.Exit(code=1)
@@ -466,8 +463,8 @@ def remote_sync(
 
 
 # launchd plist path
-LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
-LAUNCHD_LABEL = "com.warren.claude-history-backup"
+LAUNCHD_LABEL = "com.ciridae.agent-history-backup"
+LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 
 LAUNCHD_SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -512,16 +509,15 @@ def scheduler_install(
     With --remote: Sundays at 10 AM, runs [bold]remote-sync[/bold] to Google Cloud Storage.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history scheduler-install
-      [dim]$[/dim] claude-history scheduler-install --remote --dry-run
+      [dim]$[/dim] agent-history scheduler-install
+      [dim]$[/dim] agent-history scheduler-install --remote --dry-run
     """
-    # Find claude-history path
-    cli_path = shutil.which("claude-history")
+    # Find agent-history path
+    cli_path = shutil.which("agent-history")
     if not cli_path:
-        cli_path = str(Path.home() / ".local" / "bin" / "claude-history")
+        cli_path = str(Path.home() / ".local" / "bin" / "agent-history")
 
-    log_path = str(Path.home() / ".claude" / "history-backup.log")
-    plist_content = build_launchd_plist(cli_path, log_path, remote)
+    plist_content = build_launchd_plist(cli_path, str(LOG_FILE), remote)
 
     if dry_run:
         console.print(info(f"Would write {LAUNCHD_PLIST}:"))
@@ -565,7 +561,7 @@ def scheduler_remove() -> None:
     """Remove the launchd scheduler.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history scheduler-remove
+      [dim]$[/dim] agent-history scheduler-remove
     """
     # Unload if running
     subprocess.run(
@@ -586,7 +582,7 @@ def scheduler_status() -> None:
     """Check scheduler status.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history scheduler-status
+      [dim]$[/dim] agent-history scheduler-status
     """
     result = subprocess.run(
         ["launchctl", "list", LAUNCHD_LABEL],
@@ -598,9 +594,8 @@ def scheduler_status() -> None:
         console.print(success("Scheduler is active"))
         console.print(info(f"Plist: {LAUNCHD_PLIST}"))
         # Show last run time from log
-        log_file = Path.home() / ".claude" / "history-backup.log"
-        if log_file.exists():
-            mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
+        if LOG_FILE.exists():
+            mtime = datetime.fromtimestamp(LOG_FILE.stat().st_mtime)
             console.print(info(f"Log last modified: {mtime.strftime('%Y-%m-%d %H:%M')}"))
     else:
         console.print(warning("Scheduler is not active"))
@@ -615,17 +610,15 @@ def logs(
     """Show backup log file.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history logs
-      [dim]$[/dim] claude-history logs -n 50
+      [dim]$[/dim] agent-history logs
+      [dim]$[/dim] agent-history logs -n 50
     """
-    log_file = Path.home() / ".claude" / "history-backup.log"
-
-    if not log_file.exists():
+    if not LOG_FILE.exists():
         console.print(info("No log file yet"))
         return
 
     result = subprocess.run(
-        ["tail", f"-{lines}", str(log_file)],
+        ["tail", f"-{lines}", str(LOG_FILE)],
         capture_output=True,
         text=True,
     )
@@ -641,7 +634,7 @@ def list_archives() -> None:
     """List all backup archives.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history list
+      [dim]$[/dim] agent-history list
     """
     archives = get_archives()
 
@@ -668,7 +661,7 @@ def list_archives() -> None:
 
 @app.command()
 def config(
-    backup_root: Optional[str] = typer.Option(
+    backup_root: str | None = typer.Option(
         None, "--backup-root", "-b", help="Set backup root directory"
     ),
     remote_destination: str | None = typer.Option(
@@ -681,9 +674,9 @@ def config(
     """View or set configuration.
 
     [bold cyan]EXAMPLES[/bold cyan]:
-      [dim]$[/dim] claude-history config
-      [dim]$[/dim] claude-history config --backup-root ~/my-backups
-      [dim]$[/dim] claude-history config --remote-destination gs://my-bucket/transcripts
+      [dim]$[/dim] agent-history config
+      [dim]$[/dim] agent-history config --backup-root ~/my-backups
+      [dim]$[/dim] agent-history config --remote-destination gs://my-bucket/transcripts
     """
     cfg = load_config()
 

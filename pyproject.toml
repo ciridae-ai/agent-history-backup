@@ -1,14 +1,14 @@
 [project]
-name = "claude-history-backup"
+name = "agent-history-backup"
 version = "0.3.0"
-description = "Backup and manage Claude Code session history"
+description = "Back up Claude Code and Codex session transcripts"
 authors = [
     {name = "Warren Zhu", email = "wzhu@college.harvard.edu"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
-keywords = ["cli", "claude", "backup", "history"]
+keywords = ["cli", "claude", "codex", "backup", "history"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.scripts]
-claude-history = "claude_history_backup.cli:main"
+agent-history = "agent_history_backup.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -40,7 +40,7 @@ exclude = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["claude_history_backup"]
+packages = ["agent_history_backup"]
 
 [dependency-groups]
 dev = [

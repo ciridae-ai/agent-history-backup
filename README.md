@@ -1,6 +1,8 @@
-# claude-history-backup
+# Agent History Backup
 
-Backup Claude Code and Codex session history before automatic cleanup removes old sessions. Claude Code removes transcripts older than `cleanupPeriodDays` in `~/.claude/settings.json` (30 days when unset).
+Backs up Claude Code and Codex transcripts before automatic cleanup removes them. Claude Code deletes transcripts older than `cleanupPeriodDays` in `~/.claude/settings.json` (30 days when unset).
+
+`remote-sync` copies both Claude Code (`~/.claude/projects`) and Codex (`~/.codex/sessions`, `~/.codex/archived_sessions`) transcripts to Google Cloud Storage. The older local `sync` zips Claude Code transcripts only.
 
 ## Motivation
 
@@ -9,26 +11,26 @@ The data may be useful in the future. Useful for what? Well, let us focus on col
 ## Install
 
 ```bash
-pip install claude-history-backup
-# or
-uv tool install claude-history-backup
+git clone https://github.com/ciridae-ai/agent-history-backup
+cd agent-history-backup
+uv tool install .
 ```
 
 ## Quick Start
 
 ```bash
-claude-history sync              # Create a local backup archive
-claude-history scheduler-install # Install daily scheduler (macOS)
-claude-history status            # Check status and when transcripts expire
+agent-history sync              # Create a local backup archive
+agent-history scheduler-install # Install daily scheduler (macOS)
+agent-history status            # Check status and when transcripts expire
 ```
 
 Back up to Google Cloud Storage instead (needs the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install), logged in with `gcloud auth login`):
 
 ```bash
-claude-history config --remote-destination gs://my-bucket/transcripts
-claude-history remote-sync --dry-run          # List what would be copied
-claude-history remote-sync                    # Copy new and changed files
-claude-history scheduler-install --remote     # Run remote-sync weekly (macOS)
+agent-history config --remote-destination gs://my-bucket/transcripts
+agent-history remote-sync --dry-run          # List what would be copied
+agent-history remote-sync                    # Copy new and changed files
+agent-history scheduler-install --remote     # Run remote-sync weekly (macOS)
 ```
 
 ## How It Works
@@ -53,35 +55,37 @@ Each `sync` creates a new timestamped zip archive of all sessions. Archives accu
 ## Commands
 
 ```bash
-claude-history status         # Show sync status, oldest transcripts and days until removal
-claude-history sync           # Create new backup archive
-claude-history remote-sync    # Copy Claude Code and Codex transcripts to Cloud Storage
-claude-history list           # List all archives
-claude-history config         # View/set backup location and remote destination
-claude-history logs           # View scheduler log
+agent-history status         # Show sync status, oldest transcripts and days until removal
+agent-history sync           # Create new backup archive
+agent-history remote-sync    # Copy Claude Code and Codex transcripts to Cloud Storage
+agent-history list           # List all archives
+agent-history config         # View/set backup location and remote destination
+agent-history logs           # View scheduler log
 
 # Scheduler (macOS launchd - runs missed jobs on wake)
-claude-history scheduler-install                     # Daily at 10 AM: local check and zip
-claude-history scheduler-install --remote            # Sundays at 10 AM: remote-sync
-claude-history scheduler-install --remote --dry-run  # Print the plist without installing
-claude-history scheduler-status
-claude-history scheduler-remove
+agent-history scheduler-install                     # Daily at 10 AM: local check and zip
+agent-history scheduler-install --remote            # Sundays at 10 AM: remote-sync
+agent-history scheduler-install --remote --dry-run  # Print the plist without installing
+agent-history scheduler-status
+agent-history scheduler-remove
 ```
 
-The scheduler installs one job; run `scheduler-remove` before switching between the daily and weekly job. Each run's output goes to `~/.claude/history-backup.log`.
+The scheduler installs one job; run `scheduler-remove` before switching between the daily and weekly job. Each run's output goes to `~/Library/Logs/agent-history-backup.log`; `agent-history logs` shows its end.
 
 ## Configuration
 
 ```bash
 # View current config
-claude-history config
+agent-history config
 
 # Change backup location
-claude-history config --backup-root ~/Dropbox/claude-backups
+agent-history config --backup-root ~/Dropbox/claude-backups
 
 # Set the Cloud Storage destination for remote-sync
-claude-history config --remote-destination gs://my-bucket/transcripts
+agent-history config --remote-destination gs://my-bucket/transcripts
 ```
 
-Default: `~/claude_code_history`
-Config file: `~/.config/claude-history/config.json`
+Default backup location: `~/claude_code_history` (local zips hold Claude Code transcripts only)
+Config file: `~/.config/agent-history-backup/config.json`
+Sync metadata (last local and remote sync): `~/.config/agent-history-backup/sync_meta.json`
+Scheduler: launchd job `com.ciridae.agent-history-backup` in `~/Library/LaunchAgents/com.ciridae.agent-history-backup.plist`

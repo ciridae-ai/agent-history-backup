@@ -1,4 +1,4 @@
-"""Tests for claude-history-backup CLI."""
+"""Tests for agent-history-backup CLI."""
 
 import json
 from datetime import datetime, timedelta
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from claude_history_backup import cli
+from agent_history_backup import cli
 
 
 class TestHelperFunctions:
@@ -87,7 +87,7 @@ class TestMetadataOperations:
 
     def test_load_meta_with_file(self, mock_paths):
         """Should load metadata from file."""
-        meta_file = mock_paths["backup_root"] / ".sync_meta.json"
+        meta_file = mock_paths["meta_file"]
         meta_file.write_text(json.dumps({"last_sync": "2024-01-01"}))
 
         meta = cli.load_meta()
@@ -97,18 +97,18 @@ class TestMetadataOperations:
         """Should save metadata to file."""
         cli.save_meta({"last_sync": "2024-01-02", "last_sync_oldest": "2024-01-01"})
 
-        meta_file = mock_paths["backup_root"] / ".sync_meta.json"
+        meta_file = mock_paths["meta_file"]
         assert meta_file.exists()
         meta = json.loads(meta_file.read_text())
         assert meta["last_sync"] == "2024-01-02"
 
     def test_save_meta_creates_directory(self, mock_paths):
-        """Should create backup directory if it doesn't exist."""
+        """Should create the config directory if it doesn't exist."""
         import shutil
-        shutil.rmtree(mock_paths["backup_root"])
+        shutil.rmtree(mock_paths["meta_file"].parent)
 
         cli.save_meta({"test": "value"})
-        assert (mock_paths["backup_root"] / ".sync_meta.json").exists()
+        assert mock_paths["meta_file"].exists()
 
 
 class TestSessionAnalysis:
@@ -452,7 +452,7 @@ class TestSchedulerCommands:
     def test_scheduler_install_success(self, mock_which, mock_run, mock_paths, cli_runner, monkeypatch):
         """Should install scheduler successfully."""
         # Mock which to return a path
-        mock_which.return_value = "/usr/local/bin/claude-history"
+        mock_which.return_value = "/usr/local/bin/agent-history"
 
         # First call checks if already installed (return 1 = not installed)
         # Second call loads the plist (return 0 = success)
@@ -462,7 +462,7 @@ class TestSchedulerCommands:
         ]
 
         # Mock the plist path to temp dir
-        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.ciridae.agent-history-backup.plist"
         monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
 
         result = cli_runner.invoke(cli.app, ["scheduler-install"])
@@ -476,7 +476,7 @@ class TestSchedulerCommands:
         """Should warn when scheduler already installed."""
         mock_run.return_value = MagicMock(returncode=0)  # Already running
 
-        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.ciridae.agent-history-backup.plist"
         monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
 
         result = cli_runner.invoke(cli.app, ["scheduler-install"])
@@ -488,13 +488,13 @@ class TestSchedulerCommands:
     @patch("shutil.which")
     def test_scheduler_install_failure(self, mock_which, mock_run, mock_paths, cli_runner, monkeypatch):
         """Should error when launchctl load fails."""
-        mock_which.return_value = "/usr/local/bin/claude-history"
+        mock_which.return_value = "/usr/local/bin/agent-history"
         mock_run.side_effect = [
             MagicMock(returncode=1),  # Not installed
             MagicMock(returncode=1, stderr="Permission denied"),  # Load fails
         ]
 
-        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.ciridae.agent-history-backup.plist"
         monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
 
         result = cli_runner.invoke(cli.app, ["scheduler-install"])
@@ -507,7 +507,7 @@ class TestSchedulerCommands:
         """Should remove scheduler successfully."""
         mock_run.return_value = MagicMock(returncode=0)
 
-        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.ciridae.agent-history-backup.plist"
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.write_text("<plist>test</plist>")
         monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
@@ -523,7 +523,7 @@ class TestSchedulerCommands:
         """Should handle removal when not installed."""
         mock_run.return_value = MagicMock(returncode=0)
 
-        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.warren.claude-history-backup.plist"
+        plist_path = mock_paths["home"] / "Library" / "LaunchAgents" / "com.ciridae.agent-history-backup.plist"
         monkeypatch.setattr(cli, "LAUNCHD_PLIST", plist_path)
 
         result = cli_runner.invoke(cli.app, ["scheduler-remove"])
@@ -548,12 +548,9 @@ class TestLogsCommand:
         mock_run.return_value = MagicMock(returncode=0, stdout="[2024-01-01] Sync completed\n[2024-01-02] Check passed")
 
         # Create log file
-        log_file = mock_paths["home"] / ".claude" / "history-backup.log"
+        log_file = mock_paths["log_file"]
         log_file.parent.mkdir(parents=True, exist_ok=True)
         log_file.write_text("test log")
-
-        # Patch Path.home() to return our temp home
-        monkeypatch.setattr(Path, "home", lambda: mock_paths["home"])
 
         result = cli_runner.invoke(cli.app, ["logs"])
 
@@ -565,11 +562,9 @@ class TestLogsCommand:
         """Should handle empty log file."""
         mock_run.return_value = MagicMock(returncode=0, stdout="")
 
-        log_file = mock_paths["home"] / ".claude" / "history-backup.log"
+        log_file = mock_paths["log_file"]
         log_file.parent.mkdir(parents=True, exist_ok=True)
         log_file.write_text("")
-
-        monkeypatch.setattr(Path, "home", lambda: mock_paths["home"])
 
         result = cli_runner.invoke(cli.app, ["logs"])
 
@@ -594,7 +589,7 @@ class TestEdgeCases:
 
     def test_corrupted_meta_file(self, mock_paths):
         """Should handle corrupted meta file gracefully."""
-        meta_file = mock_paths["backup_root"] / ".sync_meta.json"
+        meta_file = mock_paths["meta_file"]
         meta_file.write_text("invalid json")
 
         with pytest.raises(json.JSONDecodeError):
