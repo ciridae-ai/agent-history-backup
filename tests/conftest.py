@@ -32,19 +32,72 @@ def mock_paths(temp_home, monkeypatch):
     import claude_history_backup.cli as cli
 
     claude_projects = temp_home / ".claude" / "projects"
+    claude_settings = temp_home / ".claude" / "settings.json"
+    codex_sessions = temp_home / ".codex" / "sessions"
+    codex_archived_sessions = temp_home / ".codex" / "archived_sessions"
     config_file = temp_home / ".config" / "claude-history" / "config.json"
     backup_root = temp_home / "claude_code_history"
 
     monkeypatch.setattr(cli, "CLAUDE_PROJECTS", claude_projects)
+    monkeypatch.setattr(cli, "CLAUDE_SETTINGS", claude_settings)
+    monkeypatch.setattr(cli, "CODEX_SESSIONS", codex_sessions)
+    monkeypatch.setattr(cli, "CODEX_ARCHIVED_SESSIONS", codex_archived_sessions)
     monkeypatch.setattr(cli, "CONFIG_FILE", config_file)
     monkeypatch.setattr(cli, "DEFAULT_BACKUP_ROOT", backup_root)
 
     return {
         "home": temp_home,
         "claude_projects": claude_projects,
+        "claude_settings": claude_settings,
+        "codex_sessions": codex_sessions,
+        "codex_archived_sessions": codex_archived_sessions,
         "config_file": config_file,
         "backup_root": backup_root,
     }
+
+
+FAKE_GCLOUD_SCRIPT = """#!{python}
+import json, os, sys
+with open(os.environ["FAKE_GCLOUD_CALLS"], "a") as calls:
+    calls.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1:3] == ["auth", "list"]:
+    print(os.environ.get("FAKE_GCLOUD_ACCOUNT", ""))
+    sys.exit(0)
+sys.exit(int(os.environ.get("FAKE_GCLOUD_RSYNC_EXIT", "0")))
+"""
+
+
+@pytest.fixture
+def fake_gcloud(tmp_path, monkeypatch):
+    """Put a fake `gcloud` executable first on PATH that records each call's arguments.
+
+    `auth list` prints FAKE_GCLOUD_ACCOUNT (logged in by default); every other call
+    exits with FAKE_GCLOUD_RSYNC_EXIT. `calls()` returns the recorded argument lists.
+    """
+    import json
+    import sys
+
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    gcloud = bin_dir / "gcloud"
+    gcloud.write_text(FAKE_GCLOUD_SCRIPT.format(python=sys.executable))
+    gcloud.chmod(0o755)
+    calls_file = tmp_path / "gcloud-calls.jsonl"
+
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    monkeypatch.setenv("FAKE_GCLOUD_CALLS", str(calls_file))
+    monkeypatch.setenv("FAKE_GCLOUD_ACCOUNT", "someone@example.com")
+
+    class FakeGcloud:
+        path = gcloud
+
+        @staticmethod
+        def calls() -> list[list[str]]:
+            if not calls_file.exists():
+                return []
+            return [json.loads(line) for line in calls_file.read_text().splitlines()]
+
+    return FakeGcloud()
 
 
 @pytest.fixture
