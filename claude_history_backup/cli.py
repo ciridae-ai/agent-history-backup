@@ -478,7 +478,7 @@ def build_launchd_plist(cli_path: str, log_path: str, remote: bool) -> bytes:
     launchd starts jobs with only the system PATH, so the remote job's PATH also holds
     the folder where gcloud is installed now.
     """
-    job = {
+    job: dict[str, object] = {
         "Label": LAUNCHD_LABEL,
         "StandardOutPath": log_path,
         "StandardErrorPath": log_path,
